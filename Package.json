@@ -1,0 +1,17 @@
+{
+  "name": "listen1-music-player",
+  "version": "1.0.0",
+  "description": "高级液态玻璃音乐播放器",
+  "main": "index.html",
+  "scripts": {
+    "dev": "serve .",
+    "build": "echo 'No build required'",
+    "deploy": "netlify deploy --prod"
+  },
+  "keywords": ["music", "player", "pwa", "listen1"],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "serve": "^14.0.0"
+  }
+}
