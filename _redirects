@@ -1,0 +1,5 @@
+# 单页应用重定向
+/*    /index.html   200
+
+# API 代理
+/api/*  https://listen1-api.vercel.app/api/:splat  200
