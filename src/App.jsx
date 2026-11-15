@@ -1,447 +1,288 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+/* 根组件：路由、详情浮层、播放器浮层、搜索、设置、toast。
+   RN 没有 DOM，所以详情不是 clip-path 洞，而是整页 transform 从卡片矩形放大；收起反向。 */
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Animated, BackHandler, Easing, FlatList, ScrollView, StatusBar, StyleSheet, Text, View,
+  useWindowDimensions,
+} from 'react-native';
+import Home from './screens/Home.jsx';
+import Library from './screens/Library.jsx';
+import Mine from './screens/Mine.jsx';
+import Detail from './screens/Detail.jsx';
+import Player from './screens/Player.jsx';
+import Search from './screens/Search.jsx';
+import Settings from './screens/Settings.jsx';
 import Topbar from './components/Topbar.jsx';
 import Tabbar from './components/Tabbar.jsx';
-import Home from './components/Home.jsx';
-import Library from './components/Library.jsx';
-import Mine from './components/Mine.jsx';
-import Detail from './components/Detail.jsx';
-import Player from './components/Player.jsx';
-import Sprite from './components/Sprite.jsx';
+import Icon from './components/Icon.jsx';
 import Card from './components/Card.jsx';
-import { api, norm, toast } from './lib/core.js';
-import {
-  txBegin, txEnd, showSheetNow, sheetOpenFrom, sheetClipBack, sheetFadeOut, reduceMotion,
-} from './lib/sheet.js';
-
-const CAT_ORDER = ['1', '2', '3', '4', '6'];
+import { C, F } from './theme.js';
+import { api, hydrate, norm, onToast } from './lib/core.js';
+import { loadBase } from './lib/config.js';
 
 export default function App() {
-  /* ---------- 路由 ---------- */
+  const [ready, setReady] = useState(false);
+  const [needBase, setNeedBase] = useState(false);
+  const hadBase = useRef(false);   // 之前成功连过，就允许从设置页退回来
   const [route, setRoute] = useState('home');
   const [tab, setTab] = useState('home');
-  const [libCat, setLibCat] = useState('1');
+  const [libCat, setLibCat] = useState(null);
+  const [libTitle, setLibTitle] = useState('');
+  const [list, setList] = useState(null);
 
-  /* ---------- 首页数据 ---------- */
-  const [home, setHome] = useState({ hero: [], sections: [] });
-  const [homeLoading, setHomeLoading] = useState(true);
-  const [homeErr, setHomeErr] = useState('');
-  const homeReq = useRef(null);
+  const [data, setData] = useState({ hero: [], sections: [] });
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
 
-  const loadHome = useCallback(() => {
-    setHomeLoading(true);
-    setHomeErr('');
-    homeReq.current = api.home()
-      .then(d => {
-        setHome({ hero: d.hero || [], sections: (d.sections || []).filter(s => s.items && s.items.length >= 3) });
-        setHomeLoading(false);
-      })
-      .catch(e => { setHomeErr(e.message || '网络异常'); setHomeLoading(false); });
-    return homeReq.current;
-  }, []);
-
-  /* ---------- 「全部」列表（区块展开） ---------- */
-  const [listView, setListView] = useState(null);   // {title, items}
-
-  /* ---------- 详情 ---------- */
-  const [sheet, setSheet] = useState(null);         // {show, from, autoPlay}
-  const openRef = useRef(false);                    // 是否已经有详情开着（不能用 DOM ref 兼任）
-  const curSheet = useRef(null);                    // 当前详情 {show,from}：回调里不能读 state 闭包
-  const sheetElRef = useRef(null);
-  const bodyRef = useRef(null);
-  const closingRef = useRef(false);
-
-  /* ---------- 播放器 ---------- */
+  const [sheet, setSheet] = useState(null);       // {show, from, autoPlay}
+  const closeSheetRef = useRef(null);
+  const curSheet = useRef(null);
   const [player, setPlayer] = useState(null);
-
-  /* ---------- 搜索 ---------- */
   const [searchOpen, setSearchOpen] = useState(false);
-  const [q, setQ] = useState('');
-  const [results, setResults] = useState(null);     // null 未搜，[] 空结果
-  const [searching, setSearching] = useState(false);
-  const searchT = useRef(0);
-  const inputRef = useRef(null);
-
-  /* ---------- toast ---------- */
+  const homeScroll = useRef(null);
   const [toastMsg, setToastMsg] = useState('');
-  const toastT = useRef(0);
+  const toastT = useRef(null);
+
+  /* 启动：先读后端地址与本地记录，再拉首页 */
   useEffect(() => {
-    const onT = e => {
-      setToastMsg(e.detail || '');
-      clearTimeout(toastT.current);
-      toastT.current = setTimeout(() => setToastMsg(''), 2100);
-    };
-    window.addEventListener('nf:toast', onT);
-    return () => { window.removeEventListener('nf:toast', onT); clearTimeout(toastT.current); };
+    let dead = false;
+    (async () => {
+      const b = await loadBase();
+      await hydrate();
+      if (dead) return;
+      try {
+        await api.ping();
+        if (!dead) { hadBase.current = true; setNeedBase(false); }
+      } catch (e) {
+        if (!dead) setNeedBase(true);
+      }
+    })();
+    return () => { dead = true; };
   }, []);
 
-  /* ---------- 启动 ---------- */
-  /* 启动遮罩是 index.html 里的静态节点：首屏立刻可见，React 挂载后接管淡出 */
-  const [ready, setReady] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    let t = 0;
-    /* 定时器必须由 effect 自己清理：写在 .finally 里的 return 会被 Promise 吞掉，
-       卸载后仍可能 setReady。语义不变——首页数据回来后再等 260ms 收启动遮罩。 */
-    loadHome().catch(() => {}).finally(() => {
-      if (cancelled) return;
-      t = setTimeout(() => { if (!cancelled) setReady(true); }, 260);
-    });
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [loadHome]);
-  useEffect(() => {
-    if (!ready) return;
-    const b = document.getElementById('boot');
-    if (b) {
-      b.classList.add('is-gone');
-      const t = setTimeout(() => { if (b.parentNode) b.parentNode.removeChild(b); }, 480);
-      return () => clearTimeout(t);
-    }
-  }, [ready]);
-
-  /* 顶层返回/前进：详情开着就是收详情 */
-  const go = useCallback(name => {
-    if (openRef.current) { closeDetail(); return; }
-    setListView(null);
-    setRoute(name);
-    setTab(name);
-    window.scrollTo({ top: 0 });
+  const loadHome = useCallback(async () => {
+    setLoading(true); setErr('');
+    try {
+      const d = await api.home();
+      setData({ hero: d.hero || [], sections: (d.sections || []).filter(s => s.items && s.items.length >= 3) });
+    } catch (e) {
+      setErr(e.message || '网络异常');
+    } finally { setLoading(false); }
   }, []);
 
-  const onTab = useCallback(name => {
-    if (openRef.current) { closeDetail(); return; }
-    setListView(null);
-    if (name) { setRoute(name); setTab(name); window.scrollTo({ top: 0 }); }
-    else setTab(null);
-  }, []);
-
-  /* ---------- 打开详情 ---------- */
-  const openDetail = useCallback((s, from, autoPlay = false) => {
-    if (!s || !s.id) return;
-    const it = norm(s);
-    /* 详情/播放器/搜索三者互斥：任何入口开详情都先把其它浮层收掉。 */
-    if (player) setPlayer(null);
-    if (searchOpen) closeSearch();
-    if (openRef.current) {
-      /* 已经在详情里点相关推荐：换一部，不重新飞行 */
-      setSheet({ show: it, from: null, autoPlay });
-      curSheet.current = { show: it, from: null, autoPlay };
-      if (bodyRef.current) bodyRef.current.scrollTop = 0;
-      return;
-    }
-    openRef.current = true;
-    closingRef.current = false;
-    document.documentElement.classList.add('is-locked');
-    setSheet({ show: it, from: from || null, autoPlay });
-    curSheet.current = { show: it, from: from || null, autoPlay };
-    try { history.pushState({ nf: 'detail' }, '', '#detail'); } catch (e) {}
-  }, [player, searchOpen]);
-
-  /* 详情挂载后再张开：整页自己从被点的卡片矩形长到全屏。
-     不再有「海报先飞、页面后跟上」那一层 —— 只有一个矩形在动，
-     所以中途不会出现洞口比海报大一圈、下半屏提前露出来的撕裂。 */
   useEffect(() => {
-    if (!sheet || !sheet.from) return;
-    const body = bodyRef.current;
-    if (body) body.scrollTop = 0;
-    const sh = document.getElementById('sheet');
-    const from = sheet.from;
-    /* 有起点就整页张开（clip 从卡片矩形推到全屏）；
-       起点不可用（卡片在屏外、或减动效）就直接显形。 */
-    const canClip = !reduceMotion();
-    txBegin();
-    let landed = false;
-    if (sh) {
-      sh.classList.remove('is-open', 'is-shut', 'is-dim');
-      sh.style.transform = '';
-    }
-    if (canClip) {
-      const ok = sheetOpenFrom(from);
-      if (!ok) { showSheetNow(); }
-    } else {
-      showSheetNow();
-    }
-    if (sh) { sh.classList.add('is-open'); sh.setAttribute('aria-hidden', 'false'); }
-    document.getElementById('scrim')?.classList.add('is-on');
-    /* 张开 420ms，留 60ms 余量再放行重活（正文建树）。 */
-    const t = setTimeout(() => { if (!landed) { landed = true; txEnd(); } }, 480);
-    return () => clearTimeout(t);
-  }, [sheet]);
+    if (needBase) return undefined;
+    let dead = false;
+    loadHome().then(() => { if (!dead) setTimeout(() => setReady(true), 120); });
+    return () => { dead = true; };
+  }, [needBase, loadHome]);
+
+  useEffect(() => onToast(m => {
+    setToastMsg(m);
+    clearTimeout(toastT.current);
+    toastT.current = setTimeout(() => setToastMsg(''), 2100);
+  }), []);
+
+  const openDetail = useCallback((s, from, autoPlay) => {
+    const item = { show: norm(s), from: from || null, autoPlay: !!autoPlay };
+    curSheet.current = item;
+    setSheet(item);
+    setSearchOpen(false);
+  }, []);
 
   const closeDetail = useCallback(() => {
-    if (!openRef.current || closingRef.current) return;
-    closingRef.current = true;
-    openRef.current = false;
-    const sh = document.getElementById('sheet');
-    const cur = curSheet.current;
-    const from = cur && cur.from;
-    /* 正文滚过一段之后再关，就别收了：封面早已滚出视口，
-       把整页 clip 回卡片只会露出正文中段的一小块，比直接淡出更怪。 */
-    const scrolled = bodyRef.current ? bodyRef.current.scrollTop : 0;
-
-    /* 真正卸载要等动画走完 —— 否则 setSheet(null) 一执行，详情 DOM 立刻消失，
-       收回那 300ms 里缩回去的就是一个空壳，比不收还难看。 */
-    const finish = () => {
-      if (sh) { sh.classList.remove('is-open'); sh.setAttribute('aria-hidden', 'true'); }
-      setSheet(null);
-      curSheet.current = null;
-      setTimeout(() => { closingRef.current = false; }, 120);
-    };
-
-    /* 首页与胶囊要马上回来：整页被 clip 成小块，周围露出的就是它们。 */
-    document.getElementById('scrim')?.classList.remove('is-on');
-    document.documentElement.classList.remove('is-locked');
-    try { if (location.hash === '#detail') history.back(); } catch (e) {}
-
-    if (from && scrolled <= 8 && !reduceMotion()) {
-      txBegin();
-      /* 两拍：先把整页收回卡片矩形（这段 opacity 锁 1），
-         收拢到位后再 120ms 淡掉。顺序反了就会「啪」一下没。 */
-      const shrinking = sheetClipBack(from);
-      const fade = () => sheetFadeOut(() => { txEnd(); finish(); });
-      if (shrinking) setTimeout(fade, 300);
-      else fade();
-    } else {
-      sheetFadeOut(() => { txEnd(); finish(); });
-    }
+    curSheet.current = null;
+    setSheet(null);
   }, []);
 
-  useEffect(() => {
-    const onPop = () => { if (openRef.current) closeDetail(); };
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
+  const play = useCallback(it => {
+    if (!it) return;
+    setPlayer(it);
+    closeDetail();
   }, [closeDetail]);
 
-  /* 详情下拉关闭：正文滚到顶时继续往下拖，整页跟手下移，松手超过 90px 就关。
-     位移直接写 style，不经过 React 状态 —— 拖拽要跟手，一次 setState 就是一帧渲染。
-     只有当纵向位移明显压过横向、且已经超过 10px 才接管，
-     否则会抢掉面板里的横向滑动与按钮点击。 */
-  const drag = useRef({ y: 0, x: 0, dy: 0, on: false });
-  const onBodyDown = useCallback(e => {
-    const body = bodyRef.current;
-    if (!body || body.scrollTop > 0) return;
-    drag.current = { y: e.clientY, x: e.clientX, dy: 0, on: false };
-  }, []);
-  const onBodyMove = useCallback(e => {
-    const d = drag.current;
-    if (!d.y) return;
-    const dy = e.clientY - d.y;
-    const dx = e.clientX - d.x;
-    if (!d.on) {
-      if (dy < 10 || Math.abs(dx) > Math.abs(dy) * 1.2) return;
-      d.on = true;
-      const sh = sheetElRef.current;
-      if (sh) sh.style.transition = 'none';
-    }
-    d.dy = Math.max(0, dy);
-    const sh = sheetElRef.current;
-    if (sh) sh.style.transform = 'translateY(' + d.dy + 'px)';
-  }, []);
-  const onBodyUp = useCallback(() => {
-    const d = drag.current;
-    const sh = sheetElRef.current;
-    const grabbed = d.on;
-    const dy = d.dy;
-    drag.current = { y: 0, x: 0, dy: 0, on: false };
-    if (!grabbed) return;
-    if (sh) { sh.style.transition = ''; sh.style.transform = ''; }
-    if (dy > 90) closeDetail();
-  }, [closeDetail]);
-
-  const play = useCallback(item => {
-    if (openRef.current) closeDetail();
-    setPlayer({ ...item, _k: Date.now() });
-  }, [closeDetail]);
-
-  /* ---------- 搜索 ---------- */
-  const openSearch = () => {
-    /* 详情/搜索/播放器都是整屏浮层，只允许一个在前：从详情里点搜索先收详情。 */
-    if (openRef.current) closeDetail();
-    if (player) setPlayer(null);
-    setSearchOpen(true); setQ(''); setResults(null);
-    setTimeout(() => inputRef.current && inputRef.current.focus(), 60);
-  };
-  const closeSearch = () => {
-    clearTimeout(searchT.current);          // 别让在途的搜索结果晚一拍弹回来
-    setSearchOpen(false); setResults(null); setQ(''); setSearching(false);
-  };
-  const runSearch = useCallback(v => {
-    setQ(v);
-    clearTimeout(searchT.current);
-    const k = v.trim();
-    if (!k) { setResults(null); setSearching(false); return; }
-    setSearching(true);
-    searchT.current = setTimeout(async () => {
-      try {
-        const d = await api.search(k);
-        const items = (d.items || d || []).map(norm);
-        setResults(items);
-      } catch (e) { setResults([]); }
-      setSearching(false);
-    }, 320);
+  const go = useCallback(n => {
+    setRoute(n); setTab(n); setList(null);
+    if (n !== 'library') { setLibCat(null); setLibTitle(''); }
   }, []);
 
-  /* 搜索面板是整屏浮层，打开时背景不能跟着滚。
-     用 toggle 而不是 add/remove + cleanup：cleanup 跑在旧闭包上，
-     详情打开时会拿 sheet=null 把刚加上的 is-locked 又摘掉。 */
+  const onCat = useCallback((id, name) => {
+    setLibCat(id); setLibTitle(name || ''); setRoute('library'); setTab('library'); setList(null);
+  }, []);
+
+  const onAll = useCallback((name, items) => { setList({ name, items }); }, []);
+
+  /* Android 返回键：先关最上层浮层 */
   useEffect(() => {
-    document.documentElement.classList.toggle('is-locked', !!(searchOpen || sheet || player));
-  }, [searchOpen, sheet, player]);
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (searchOpen) { setSearchOpen(false); return true; }
+      if (player) { setPlayer(null); return true; }
+      if (sheet) {
+        if (closeSheetRef.current) closeSheetRef.current();
+        return true;
+      }
+      if (list) { setList(null); return true; }
+      if (route !== 'home') { go('home'); return true; }
+      return false;
+    });
+    return () => sub.remove();
+  }, [searchOpen, player, sheet, list, route, go]);
 
-  /* ESC：播放器自己管（要顺手记进度），App 不抢。
-     否则详情里拉起播放器后按 ESC，App 会把详情一起收掉，播放器却还在屏幕上。 */
-  useEffect(() => {
-    if (!searchOpen && !sheet) return;
-    const onKey = e => {
-      if (e.key !== 'Escape') return;
-      if (player) return;                 // 全权交给 Player 的 ESC
-      if (searchOpen) closeSearch();
-      else closeDetail();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [searchOpen, sheet, player, closeDetail]);
-
-  /* ---------- 渲染 ---------- */
-  const viewKey = route + ':' + libCat + ':' + (listView ? listView.title : '');
-  const body = useMemo(() => {
-    if (listView) {
-      return (
-        <>
-          <div className="sect">
-            <div className="sect__k">COLLECTION</div>
-            <h1 className="sect__t">{listView.title}</h1>
-          </div>
-          <div className="grid">
-            {listView.items.map((s, i) => {
-              const n = norm(s);
-              return (
-                <Card2 key={n.id + ':' + i} s={n} onOpen={openDetail} />
-              );
-            })}
-          </div>
-        </>
-      );
-    }
-    if (route === 'library') {
-      return <Library cat={libCat} onCat={(c) => setLibCat(c)} onOpen={openDetail} onTab={onTab} />;
-    }
-    if (route === 'mylist') {
-      return <Mine onOpen={openDetail} />;
-    }
+  if (needBase) {
     return (
-      <Home
-        data={home}
-        loading={homeLoading}
-        error={homeErr}
-        onOpen={openDetail}
-        onCat={(c) => { setTab('library'); setRoute('library'); setLibCat(c); window.scrollTo({ top: 0 }); }}
-        onMore={(title, items) => setListView({ title, items })}
-        onRetry={() => loadHome()}
-        onTop={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-      />
+      <View style={st.root}>
+        <StatusBar barStyle="light-content" backgroundColor={C.bg} />
+        <Settings onDone={() => setNeedBase(false)} canCancel={hadBase.current} />
+      </View>
     );
-  }, [viewKey, home, homeLoading, homeErr, listView, route, libCat, openDetail, onTab, loadHome]);
+  }
 
   return (
-    <>
-      <Sprite />
-      <div className="app" id="app" hidden={!ready}>
-        <Topbar
-          back={route !== 'home' || !!listView}
-          onBack={n => go(typeof n === 'string' ? n : 'home')}
-          onSearch={openSearch}
-        />
+    <View style={st.root}>
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
 
-        <main className="view" id="view">
-          <div key={viewKey}>{body}</div>
-        </main>
-
-        <Tabbar route={tab || route} onNav={go} />
-      </div>
-
-      <section className={'searchpanel' + (searchOpen ? ' is-open' : '')} id="searchPanel" aria-hidden={!searchOpen}>
-        <div className="searchpanel__bar">
-          <svg className="searchpanel__ico"><use href="#i-search" /></svg>
-          <input
-            id="searchInput"
-            ref={inputRef}
-            type="search"
-            value={q}
-            placeholder="搜片名、剧名、频道…"
-            autoComplete="off"
-            enterKeyHint="search"
-            onChange={e => runSearch(e.target.value)}
+      {!ready ? (
+        <View style={st.boot}>
+          <Icon name="i-mark" size={44} color="rgba(255,255,255,.5)" />
+          <Text style={st.bootName}>NEON<Text style={{ color: C.accent }}>FLICK</Text></Text>
+          <View style={st.bootLine}><BootBar /></View>
+        </View>
+      ) : (
+        <View style={{ flex: 1 }}>
+          <Topbar
+            back={route !== 'home' || !!list}
+            onBack={() => { if (list) setList(null); else go('home'); }}
+            onSearch={() => setSearchOpen(true)}
           />
-          <button className="iconbtn" id="btnSearchClose" aria-label="关闭" onClick={closeSearch}>
-            <svg><use href="#i-close" /></svg>
-          </button>
-        </div>
-        <div className="searchpanel__body" id="searchResults">
-          {!searching && !results ? (
-            <div className="empty">
-              <h3>搜点什么</h3>
-              <p>片名、演员、类型都可以</p>
-            </div>
-          ) : null}
-          {searching ? (
-            <div className="grid">
-              {Array.from({ length: 6 }, (_, i) => <div key={i} className="card sk-card"><div className="card__art sk sk--art" /><div className="sk sk--n" /><div className="sk sk--s" /></div>)}
-            </div>
-          ) : null}
-          {!searching && results && !results.length ? (
-            <div className="empty">
-              <svg><use href="#i-search" /></svg>
-              <h3>没有找到「{q}」</h3>
-              <p>换个关键词试试</p>
-            </div>
-          ) : null}
-          {!searching && results && results.length ? (
-            <>
-              <div className="sect">
-                <div className="sect__k">RESULT</div>
-                <h1 className="sect__t">结果 · {results.length}</h1>
-              </div>
-              <div className="grid">
-                {results.map((s, i) => (
-                  <Card2 key={s.id + ':' + i} s={s} eager
-                    onOpen={(ss, from) => { closeSearch(); requestAnimationFrame(() => openDetail(ss, from)); }} />
-                ))}
-              </div>
-            </>
-          ) : null}
-        </div>
-      </section>
 
-      <div className={'scrim' + (sheet ? ' is-on' : '')} id="scrim" onClick={closeDetail} />
-
-      <section className={'sheet' + (sheet ? ' is-open' : '')} id="sheet" ref={sheetElRef}
-        role="dialog" aria-modal={sheet ? 'true' : undefined} aria-hidden={!sheet}>
-        <div className="sheet__grab" id="sheetGrab"><i /></div>
-        <div className="sheet__scroll" id="sheetBody" ref={bodyRef}
-          onPointerDown={onBodyDown} onPointerMove={onBodyMove} onPointerUp={onBodyUp} onPointerCancel={onBodyUp}>
-          {sheet ? (
-            <Detail
-              key={sheet.show.id}
-              show={sheet.show}
-              autoPlay={sheet.autoPlay}
-              onClose={closeDetail}
-              onPlay={play}
-              onRelated={(s, from) => openDetail(s, from)}
+          {list ? (
+            <SimplerList list={list} onOpen={openDetail} />
+          ) : route === 'library' ? (
+            <Library cat={libCat} onCat={onCat} onOpen={openDetail} />
+          ) : route === 'mylist' ? (
+            <Mine onOpen={openDetail} onSettings={() => setNeedBase(true)} />
+          ) : (
+            <HomeScreen
+              scrollRef={homeScroll}
+              data={data} loading={loading} err={err} onRetry={loadHome}
+              onOpen={openDetail} onPlay={it => openDetail(it, null, true)}
+              onCat={onCat} onAll={onAll}
             />
-          ) : null}
-        </div>
-      </section>
+          )}
+
+          {!sheet && !player && !searchOpen ? <Tabbar route={tab} onNav={go} /> : null}
+        </View>
+      )}
+
+      {sheet ? (
+        <Detail
+          key={sheet.show.id}
+          show={sheet.show}
+          from={sheet.from}
+          autoPlay={sheet.autoPlay}
+          onClose={closeDetail}
+          onPlay={play}
+          onRelated={s => openDetail(s, null, false)}
+          closeRef={closeSheetRef}
+        />
+      ) : null}
 
       {player ? <Player item={player} onClose={() => setPlayer(null)} /> : null}
 
-      <div className={'toast' + (toastMsg ? ' is-on' : '') + (sheet || player ? ' is-up' : '')} id="toast">
-        {toastMsg}
-      </div>
-    </>
+      {searchOpen ? (
+        <Search onClose={() => setSearchOpen(false)} onOpen={(s, from) => {
+          setSearchOpen(false);
+          setTimeout(() => openDetail(s, from, false), 60);
+        }} />
+      ) : null}
+
+      {toastMsg ? (
+        <View style={st.toast} pointerEvents="none">
+          <Text style={st.toastTx}>{toastMsg}</Text>
+        </View>
+      ) : null}
+    </View>
   );
 }
 
-/* 列表/搜索结果里的卡片：与 Card 同构，单开一层把 onClick 签名接对 */
-function Card2({ s, onOpen, eager }) {
-  return <Card s={s} eager={eager} onClick={(ss, from) => onOpen(ss, from)} />;
+/* 启动条的循环扫光：纯合成动画，不占 JS 线程 */
+function BootBar() {
+  const x = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(Animated.timing(x, {
+      toValue: 1, duration: 1100, easing: Easing.inOut(Easing.quad), useNativeDriver: true,
+    }));
+    loop.start();
+    return () => loop.stop();
+  }, [x]);
+  return (
+    <Animated.View
+      style={[st.bootFill, {
+        transform: [{ translateX: x.interpolate({ inputRange: [0, 1], outputRange: [-46, 120] }) }],
+      }]}
+    />
+  );
 }
+
+/* 首页独立一层，避免把 data 相关 memo 塞进根组件 */
+function HomeScreen({ scrollRef, ...props }) {
+  return (
+    <ScrollView
+      ref={scrollRef}
+      style={{ flex: 1 }}
+      contentContainerStyle={{ paddingTop: 0 }}
+      showsVerticalScrollIndicator={false}
+    >
+      <Home {...props} onTop={() => scrollRef.current && scrollRef.current.scrollTo({ y: 0, animated: true })} />
+    </ScrollView>
+  );
+}
+
+/* 「全部」入口：把某个轨道的 items 铺成三列 */
+function SimplerList({ list, onOpen }) {
+  const { width } = useWindowDimensions();
+  const cardW = (width - 40 - 24) / 3;
+  const items = (list && list.items) || [];
+  return (
+    <View style={{ paddingTop: 56 + (StatusBar.currentHeight || 0), flex: 1 }}>
+      <View style={st.sect}>
+        <Text style={st.sectK}>COLLECTION</Text>
+        <Text style={st.sectT}>{(list && list.name) || '全部'}</Text>
+      </View>
+      <FlatList
+        style={{ flex: 1 }}
+        data={items}
+        keyExtractor={(it, i) => (it.id || i) + ':' + i}
+        numColumns={3}
+        columnWrapperStyle={{ gap: 12, paddingHorizontal: 20 }}
+        contentContainerStyle={{ gap: 16, paddingTop: 16, paddingBottom: 140 }}
+        renderItem={({ item }) => (
+          <View style={{ width: cardW }}>
+            <Card s={item} width={cardW} onClick={onOpen} />
+          </View>
+        )}
+      />
+    </View>
+  );
+}
+
+const st = StyleSheet.create({
+  root: { flex: 1, backgroundColor: C.bg },
+  boot: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
+  bootName: { fontFamily: F.display, fontSize: 26, letterSpacing: 5, color: '#fff' },
+  bootLine: {
+    marginTop: 6, width: 120, height: 2, borderRadius: 1, overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,.12)',
+  },
+  bootFill: { width: 46, height: 2, borderRadius: 1, backgroundColor: C.accent },
+  sect: { paddingHorizontal: 20, paddingTop: 6 },
+  sectK: { fontFamily: F.bold, fontSize: 10.5, letterSpacing: 2.2, color: C.accent },
+  sectT: { marginTop: 3, fontFamily: F.display, fontSize: 26, color: C.tx },
+  toast: {
+    position: 'absolute', left: 40, right: 40, bottom: 104, alignItems: 'center',
+    paddingVertical: 10, paddingHorizontal: 14, borderRadius: 999,
+    backgroundColor: 'rgba(20,20,26,.94)',
+    borderWidth: StyleSheet.hairlineWidth, borderColor: C.line2,
+  },
+  toastTx: { fontFamily: F.semi, fontSize: 12, color: C.tx, textAlign: 'center' },
+});

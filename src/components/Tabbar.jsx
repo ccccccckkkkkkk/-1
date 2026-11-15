@@ -1,133 +1,149 @@
-import { useRef } from 'react';
+/* 悬浮胶囊：三个 tab。长按 360ms 抬起并跟手，松手超过 22px 才切页。
+   触摸走 View 的 responder 而不是 Pressable —— Pressable 内部由 Pressability 接管
+   responder，父层拿不到 onTouchMove，长按拖动会整段丢失。 */
+import React, { useEffect, useRef, useState } from 'react';
+import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
+import Icon from './Icon.jsx';
+import { C, F } from '../theme.js';
 
 const TABS = [
-  { nav: 'home', icon: 'i-home', label: '首页' },
-  { nav: 'library', icon: 'i-tv', label: '片库' },
-  { nav: 'mylist', icon: 'i-bookmark', label: '我的' },
+  { id: 'home', name: '首页', icon: 'i-home' },
+  { id: 'library', name: '片库', icon: 'i-tv' },
+  { id: 'mylist', name: '我的', icon: 'i-bookmark' },
 ];
 
-/* 悬浮胶囊导航：长按 360ms 抬起，栏体小幅跟手，松手选中指针下方的项。
-   定位始终用「按下时的栏体范围」——栏体自己也在平移，用新位置算会永远选不中 */
+const HOLD = 360, SLOP = 9, MOVE = 22, INSET = 6;
+
 export default function Tabbar({ route, onNav }) {
-  const barRef = useRef(null);
-  const pillRef = useRef(null);
-  const lensRef = useRef(null);
-  const idx = Math.max(0, TABS.findIndex(t => t.nav === route));
-  const st = useRef({ armed: false, dragging: false, pid: null, sx: 0, sy: 0, rawDx: 0, rawDy: 0, baseL: 0, baseW: 1, hold: 0, hot: null });
+  const idx = Math.max(0, TABS.findIndex(t => t.id === route));
+  const [lift, setLift] = useState(-1);
+  const [pressed, setPressed] = useState(-1);
+  const [barW, setBarW] = useState(0);
+  const drag = useRef({ armed: false, x0: 0, y0: 0, down: -1, t: null }).current;
+  const slide = useRef(new Animated.Value(idx)).current;
+  const offX = useRef(new Animated.Value(0)).current;
+  const offY = useRef(new Animated.Value(0)).current;
 
-  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  useEffect(() => {
+    Animated.timing(slide, {
+      toValue: idx, duration: 300, easing: Easing.bezier(.77, 0, .175, 1), useNativeDriver: true,
+    }).start();
+  }, [idx, slide]);
 
-  const tabEls = () => barRef.current ? [...barRef.current.querySelectorAll('.tab')] : [];
+  useEffect(() => () => clearTimeout(drag.t), [drag]);
 
   const tabAt = x => {
-    const tabs = tabEls();
-    const s = st.current;
-    let rel = (x - s.baseL) / s.baseW;
-    if (rel < 0) rel = 0;
-    if (rel > 0.999) rel = 0.999;
-    return tabs[Math.floor(rel * tabs.length)] || null;
+    if (!barW) return -1;
+    const w = (barW - INSET * 2) / TABS.length;
+    const i = Math.floor((x - INSET) / w);
+    return Math.max(0, Math.min(TABS.length - 1, i));
   };
 
-  const reset = () => {
-    const bar = barRef.current, s = st.current;
-    clearTimeout(s.hold);
-    if (bar) {
-      bar.classList.remove('is-drag', 'is-touch');
-      bar.style.removeProperty('--dx');
-      bar.style.removeProperty('--dy');
-    }
-    if (s.hot) { s.hot.classList.remove('is-lift'); s.hot = null; }
-    if (lensRef.current) lensRef.current.removeAttribute('style');
-    if (pillRef.current) pillRef.current.style.setProperty('--i', idx);
-    s.armed = false; s.dragging = false; s.pid = null; s.rawDx = 0; s.rawDy = 0;
-  };
-
-  const onDown = e => {
-    if (e.button === 1 || e.button === 2) return;
-    const bar = barRef.current, s = st.current;
-    const r0 = bar.getBoundingClientRect();
-    s.baseL = r0.left; s.baseW = r0.width;
-    s.sx = e.clientX; s.sy = e.clientY; s.rawDx = s.rawDy = 0;
-    s.armed = true; s.dragging = false; s.pid = e.pointerId;
-    bar.classList.add('is-touch');   // 按下即点亮透镜高光，reset 里摘掉
-    clearTimeout(s.hold);
-    s.hold = setTimeout(() => {
-      if (!s.armed) return;
-      s.dragging = true;
-      try { bar.setPointerCapture(s.pid); } catch (err) {}
-      bar.classList.add('is-drag');
-      if (navigator.vibrate) { try { navigator.vibrate(12); } catch (err) {} }
-      const h = tabAt(s.sx);
-      if (h) { h.classList.add('is-lift'); s.hot = h; }
-    }, 360);
+  const onGrant = e => {
+    const { pageX, pageY, locationX } = e.nativeEvent;
+    drag.armed = false;
+    drag.x0 = pageX; drag.y0 = pageY;
+    drag.down = tabAt(locationX);
+    setPressed(drag.down);
+    clearTimeout(drag.t);
+    drag.t = setTimeout(() => { drag.armed = true; setLift(drag.down); }, HOLD);
   };
 
   const onMove = e => {
-    const bar = barRef.current, s = st.current;
-    if (!s.armed) return;
-    if (!s.dragging) {
-      if (Math.abs(e.clientX - s.sx) > 9 || Math.abs(e.clientY - s.sy) > 9) {
-        clearTimeout(s.hold); s.armed = false;   // 想滚动/滑动，让给页面
+    const { pageX, pageY } = e.nativeEvent;
+    if (!drag.armed) {
+      if (Math.abs(pageX - drag.x0) > SLOP || Math.abs(pageY - drag.y0) > SLOP) {
+        clearTimeout(drag.t); drag.armed = false; setPressed(-1);
       }
       return;
     }
-    e.preventDefault();
-    s.rawDx = e.clientX - s.sx; s.rawDy = e.clientY - s.sy;
-    bar.style.setProperty('--dx', clamp(s.rawDx, -12, 12).toFixed(1) + 'px');
-    bar.style.setProperty('--dy', clamp(s.rawDy, -8, 8).toFixed(1) + 'px');
-    const n = tabEls().length;
-    const rel = (e.clientX - s.baseL) / s.baseW;
-    if (pillRef.current) pillRef.current.style.setProperty('--i', clamp(rel * n - 0.5, 0, n - 1).toFixed(3));
-    if (lensRef.current) {
-      const rr = bar.getBoundingClientRect();
-      lensRef.current.style.setProperty('--lx', (((e.clientX - rr.left) / rr.width) * 100).toFixed(1) + '%');
-      lensRef.current.style.setProperty('--ly', (((e.clientY - rr.top) / rr.height) * 100).toFixed(1) + '%');
-    }
-    const h = tabAt(e.clientX);
-    if (h !== s.hot) {
-      if (s.hot) s.hot.classList.remove('is-lift');
-      s.hot = h;
-      if (h) h.classList.add('is-lift');
-    }
+    offX.setValue(Math.max(-12, Math.min(12, pageX - drag.x0)));
+    offY.setValue(Math.max(-8, Math.min(8, pageY - drag.y0)));
   };
 
-  const onUp = () => {
-    const s = st.current, bar = barRef.current;
-    if (!s.armed && !s.dragging) return;
-    const moved = Math.abs(s.rawDx) > 22 || Math.abs(s.rawDy) > 22;
-    const target = s.dragging && moved && s.hot ? s.hot.dataset.nav : null;
-    const wasDrag = s.dragging;
-    reset();
-    if (wasDrag && target) onNav(target);
-    if (wasDrag) {   // 拖动后吞掉紧随其后的 click
-      const kill = ev => { ev.stopPropagation(); ev.preventDefault(); };
-      bar.addEventListener('click', kill, { capture: true, once: true });
-      setTimeout(() => bar.removeEventListener('click', kill, true), 360);
+  const onRelease = e => {
+    clearTimeout(drag.t);
+    const { pageX, pageY } = e.nativeEvent;
+    const rawDx = pageX - drag.x0;
+    const rawDy = pageY - drag.y0;
+    const wasArmed = drag.armed;
+    drag.armed = false;
+    const landed = drag.down;
+    drag.down = -1;
+
+    Animated.parallel([
+      Animated.spring(offX, { toValue: 0, useNativeDriver: true, speed: 24, bounciness: 6 }),
+      Animated.spring(offY, { toValue: 0, useNativeDriver: true, speed: 24, bounciness: 6 }),
+    ]).start();
+    setLift(-1); setPressed(-1);
+
+    if (wasArmed) {
+      if (Math.abs(rawDx) > MOVE || Math.abs(rawDy) > MOVE) {
+        const step = Math.abs(rawDx) > Math.abs(rawDy) ? (rawDx > 0 ? 1 : -1) : (rawDy > 0 ? 1 : -1);
+        const nx = Math.max(0, Math.min(TABS.length - 1, idx + step));
+        if (nx !== idx) onNav(TABS[nx].id);
+      }
+      return;
     }
+    // 没长按：当成一次普通点击
+    if (landed >= 0 && Math.abs(rawDx) < SLOP && Math.abs(rawDy) < SLOP) onNav(TABS[landed].id);
   };
 
   return (
-    <nav className="tabbar" id="tabbar" aria-label="主导航"
-      ref={barRef}
-      onPointerDown={onDown}
-      onPointerMove={onMove}
-      onPointerUp={onUp}
-      onPointerCancel={onUp}
-      onLostPointerCapture={onUp}
+    <Animated.View
+      style={[st.bar, {
+        transform: [
+          { translateX: offX },
+          { translateY: offY },
+          ...(lift >= 0 ? [{ scale: 1.055 }] : []),
+        ],
+      }]}
+      onLayout={e => setBarW(e.nativeEvent.layout.width)}
+      onStartShouldSetResponder={() => true}
+      onResponderTerminationRequest={() => false}
+      onResponderGrant={onGrant}
+      onResponderMove={onMove}
+      onResponderRelease={onRelease}
+      onResponderTerminate={onRelease}
     >
-      <i className="tabbar__pill" id="tabPill" ref={pillRef} style={{ '--i': idx }} />
-      <i className="tabbar__lens" id="tabLens" ref={lensRef} />
-      {TABS.map((t, k) => (
-        <button
-          key={t.nav}
-          className={'tab' + (k === idx ? ' is-on' : '')}
-          data-nav={t.nav}
-          onClick={() => onNav(t.nav)}
-        >
-          <svg><use href={'#' + t.icon} /></svg>
-          <span>{t.label}</span>
-        </button>
-      ))}
-    </nav>
+      <Animated.View style={[st.pill, {
+        left: INSET + (barW - INSET * 2) / TABS.length,
+        transform: [{ translateX: Animated.multiply(slide, (barW - INSET * 2) / TABS.length) }],
+      }]} />
+      {TABS.map((t, i) => {
+        const on = i === idx;
+        const up = lift === i;
+        return (
+          <View
+            key={t.id}
+            style={[st.tab, pressed === i && st.tabDown, up && st.tabUp]}
+            pointerEvents="none"
+          >
+            <Icon name={t.icon} size={21} color={on ? C.tx : C.tx3} />
+            <Text style={[st.name, on && st.nameOn]}>{t.name}</Text>
+          </View>
+        );
+      })}
+    </Animated.View>
   );
 }
+
+const st = StyleSheet.create({
+  bar: {
+    position: 'absolute', bottom: 18, alignSelf: 'center',
+    flexDirection: 'row', alignItems: 'center',
+    width: '86%', maxWidth: 342, height: 64, paddingHorizontal: INSET,
+    borderRadius: 999, backgroundColor: C.glass,
+    borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,.10)',
+    zIndex: 70,
+  },
+  pill: {
+    position: 'absolute', top: INSET, bottom: INSET,
+    borderRadius: 999, backgroundColor: 'rgba(255,255,255,.10)',
+  },
+  tab: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 3 },
+  tabDown: { opacity: 0.62 },
+  tabUp: { transform: [{ scale: 1.08 }] },
+  name: { fontFamily: F.semi, fontSize: 10, color: C.tx3 },
+  nameOn: { color: C.tx },
+});

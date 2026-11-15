@@ -1,80 +1,112 @@
-import { useEffect, useRef, useState } from 'react';
-import { metaLine, showName } from '../lib/core.js';
+/* 卡片：与 Web 版同构（海报 + 占位渐变 + 角标 + 进度条 + 名次），用 RN 的 Image/Pressable 重画。
+   点击时把卡片在屏幕上的矩形抛出去，详情页拿它当展开起点。 */
+import React, { useRef, useState } from 'react';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import LinearGradient from './Gradient.jsx';
+import Icon from './Icon.jsx';
+import { C, F, R } from '../theme.js';
+import { metaLine, ph, showName } from '../lib/core.js';
 
-/* 卡片：点击时把 .card__art 的真实矩形与圆角一起抛出去，供共享元素转场当起点 */
-export default function Card({ s, rank, wide, badge, sub, eager, progress = 0, onClick }) {
+export default function Card({ s, rank, wide, badge, sub, progress = 0, onClick, width }) {
   const artRef = useRef(null);
-  const imgRef = useRef(null);
   const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [box, setBox] = useState(null);
 
-  /* 换海报时清掉 onError 留下的 opacity:0、重置 loaded；
-     图片在缓存里时 load 事件不一定派发，挂载后补查一次 naturalWidth */
-  useEffect(() => {
-    const img = imgRef.current;
-    if (img) img.style.opacity = '';
-    setLoaded(false);
-    if (img && img.complete && img.naturalWidth) setLoaded(true);
-  }, [s.poster]);
-
-  const fire = () => {
-    const art = artRef.current;
-    const r = art ? art.getBoundingClientRect() : null;
-    const rad = art ? parseFloat(getComputedStyle(art).borderTopLeftRadius) : NaN;
-    const from = r && r.width
-      ? { l: r.left, t: r.top, w: r.width, h: r.height, r: isFinite(rad) ? rad : 16 }
-      : null;
-    if (onClick) onClick(s, from);
-  };
-
+  const tone = ph(s);
   const label = badge || s.note;
   const line = sub || metaLine(s);
 
+  const measure = () => {
+    const n = artRef.current;
+    if (!n || !n.measureInWindow) { onClick && onClick(s, box); return; }
+    n.measureInWindow((x, y, w, h) => {
+      const from = w > 0 ? { l: x, t: y, w, h, r: R.card } : null;
+      setBox(from);
+      onClick && onClick(s, from);
+    });
+  };
+
   return (
-    <button
-      type="button"
-      className={'card' + (rank ? ' card--rank' : '') + (wide ? ' card--wide' : '')}
-      data-id={s.id}
-      onClick={fire}
+    <Pressable
+      style={[st.wrap, width ? { width } : null]}
+      onPress={measure}
+      android_ripple={{ color: 'rgba(255,255,255,.08)', borderless: false }}
     >
-      <div className={'card__art' + (loaded ? ' is-loaded' : '')} ref={artRef}>
-        {/* 无 poster 时不渲染 img：src="" 会再发一次对当前页的请求 */}
-        {s.poster ? (
-          <img
-            ref={imgRef}
-            {...(eager ? { fetchpriority: 'high' } : { loading: 'lazy' })}
-            decoding="async"
-            src={s.poster}
-            alt={showName(s)}
-            className={loaded ? 'on' : ''}
+      <View ref={artRef} collapsable={false}
+        style={[st.art, wide && st.artWide, { backgroundColor: tone[0] }]}>
+        <LinearGradient colors={tone} style={StyleSheet.absoluteFill} />
+        {s.poster && !failed ? (
+          <Image
+            source={{ uri: s.poster }}
+            style={st.img}
+            resizeMode="cover"
             onLoad={() => setLoaded(true)}
-            onError={e => { e.currentTarget.style.opacity = '0'; setLoaded(false); }}
+            onError={() => { setFailed(true); setLoaded(false); }}
+            fadeDuration={180}
           />
         ) : null}
-        <i className="card__ph" aria-hidden="true">
-          <svg><use href="#i-mark" /></svg>
-          <em>NEON<i>FLICK</i></em>
-        </i>
-        {label ? <span className="card__badge">{label}</span> : null}
-        {progress > 0.02 && progress < 0.97 ? (
-          <div className="card__prog"><i style={{ width: (progress * 100).toFixed(1) + '%' }} /></div>
+        {!loaded ? (
+          <View style={st.ph} pointerEvents="none">
+            <Icon name="i-mark" size={26} color="rgba(255,255,255,.20)" />
+            <Text style={st.phName}>NEON<Text style={{ color: C.accent }}>FLICK</Text></Text>
+          </View>
         ) : null}
-        {rank ? <span className="card__rank">{rank}</span> : null}
-      </div>
-      <div className="card__name">{showName(s)}</div>
-      {/* 首页区块只带 id/title/poster/rating，没有年份与类型：
-          副标题算出来是空串，渲染出来只剩一条 3px 的空行，不如不渲染 */}
-      {line ? <div className="card__sub">{line}</div> : null}
-    </button>
+        {label ? (
+          <View style={st.badge}><Text style={st.badgeTx} numberOfLines={1}>{label}</Text></View>
+        ) : null}
+        {progress > 0.02 && progress < 0.97 ? (
+          <View style={st.prog}><View style={[st.progIn, { width: (progress * 100).toFixed(1) + '%' }]} /></View>
+        ) : null}
+        {rank ? <Text style={st.rank}>{rank}</Text> : null}
+      </View>
+      <Text style={st.name} numberOfLines={2}>{showName(s)}</Text>
+      {line ? <Text style={st.sub} numberOfLines={1}>{line}</Text> : null}
+    </Pressable>
   );
 }
 
-/* 骨架卡 */
-export function SkCard() {
+export function SkCard({ width }) {
   return (
-    <div className="card sk-card">
-      <div className="card__art sk sk--art" />
-      <div className="sk sk--n" />
-      <div className="sk sk--s" />
-    </div>
+    <View style={[st.wrap, width ? { width } : null]}>
+      <View style={[st.art, st.sk]} />
+      <View style={[st.sk, { height: 10, borderRadius: 5, marginTop: 8, width: '82%' }]} />
+      <View style={[st.sk, { height: 8, borderRadius: 4, marginTop: 6, width: '56%' }]} />
+    </View>
   );
 }
+
+const st = StyleSheet.create({
+  wrap: { flex: 1 },
+  art: {
+    width: '100%', aspectRatio: 2 / 3, borderRadius: R.card,
+    overflow: 'hidden', backgroundColor: C.card,
+  },
+  artWide: { aspectRatio: 16 / 9 },
+  img: { ...StyleSheet.absoluteFillObject, width: '100%', height: '100%' },
+  ph: {
+    ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', gap: 6,
+  },
+  phName: {
+    fontFamily: F.display, fontSize: 10, letterSpacing: 1.4,
+    color: 'rgba(255,255,255,.30)',
+  },
+  badge: {
+    position: 'absolute', top: 6, left: 6, maxWidth: '80%',
+    paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5,
+    backgroundColor: 'rgba(0,0,0,.62)',
+  },
+  badgeTx: { fontFamily: F.semi, fontSize: 9, color: '#fff' },
+  prog: {
+    position: 'absolute', left: 0, right: 0, bottom: 0, height: 3,
+    backgroundColor: 'rgba(255,255,255,.22)',
+  },
+  progIn: { height: 3, backgroundColor: C.accent },
+  rank: {
+    position: 'absolute', top: 4, right: 6, fontFamily: F.display, fontSize: 18,
+    color: 'rgba(255,255,255,.9)', textShadowColor: 'rgba(0,0,0,.5)', textShadowRadius: 4,
+  },
+  name: { marginTop: 7, fontFamily: F.semi, fontSize: 12, lineHeight: 16, color: C.tx },
+  sub: { marginTop: 2, fontFamily: F.text, fontSize: 10, color: C.tx3 },
+  sk: { backgroundColor: C.card2, borderRadius: R.card },
+});
