@@ -8,11 +8,13 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE20: 'true'
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
 jobs:
   apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -27,17 +29,26 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # ubuntu-latest 镜像已预装完整 Android SDK（platforms / build-tools / NDK /
+      # cmdline-tools/latest）。不要再跑 android-actions/setup-android：它会强制
+      # 降级到 cmdline-tools/16.0 并尝试安装早已下线的 "tools" 包，直接失败。
+      - name: Prepare Android SDK
+        run: |
+          SDK=/usr/local/lib/android/sdk
+          BIN="$SDK/cmdline-tools/latest/bin"
+          if [ ! -x "$BIN/sdkmanager" ]; then
+            BIN=$(dirname "$(find "$SDK/cmdline-tools" -name sdkmanager -type f | head -1)")
+          fi
+          echo "$BIN" >> $GITHUB_PATH
+          echo "SDKMAN=$BIN/sdkmanager" >> $GITHUB_ENV
+          "$BIN/sdkmanager" --version
 
-      # 必须先接受许可再安装：licenses 放后面的话 sdkmanager --install 会
-      # 因为许可未接受直接失败，set -e 会把整个 job 打断。
       - name: Accept SDK licenses
-        run: yes | sdkmanager --licenses > /dev/null || true
+        run: yes | "$SDKMAN" --licenses > /dev/null || true
 
       - name: Install SDK packages
         run: |
-          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+          "$SDKMAN" --install "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
 
       - name: Cache Gradle
         uses: actions/cache@v4
